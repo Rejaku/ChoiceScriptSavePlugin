@@ -1,15 +1,23 @@
+// Ext function toggle (set true/false to enable/disable)
+var btn_delete_all = true;
+var btn_export = true;
+var btn_export_all = true;
+var btn_import = true;
+
+// set length (in ms) to delay before executing
+var timeoutLength = 100; // default value: 3000
+
 /* ----- New ChoiceScript Commands ----- */
 Scene.prototype.sm_save = function(line) {
     var stack = this.tokenizeExpr(line);
     if (stack.length > 2)
         throw new Error("sm_save: Invalid number of arguments, expected 0, 1 (save name) or 2 (id).");
-    ChoiceScriptSavePlugin._save(new Date().getTime(), stack.length == 1 ? this.evaluateExpr(stack) : null);
+    ChoiceScriptSavePlugin._save(new Date().getTime(), stack.length === 1 ? this.evaluateExpr(stack) : null);
 }
 
 Scene.prototype.sm_load = function(line) {
     var stack = this.tokenizeExpr(line);
     var variable = this.evaluateExpr(stack);
-    //if (stack.length === 0)
     this.finished = true;
     this.skipFooter = true;
     this.screenEmpty = true;
@@ -18,8 +26,9 @@ Scene.prototype.sm_load = function(line) {
 
 Scene.prototype.sm_delete = function(line) {
     var stack = this.tokenizeExpr(line);
-    if (stack.length != 1)
+    if (stack.length !== 1) {
         throw new Error("sm_delete: Invalid number of arguments, expected 1.");
+    }
     ChoiceScriptSavePlugin._delete(this.evaluateExpr(stack));
 }
 
@@ -45,7 +54,7 @@ Scene.prototype.sm_menu = function(data) {
     } else if (data === "true") {
         active = true;
     } else if (!data) { // toggle
-        active = selectEle.style.display == "none";
+        active = selectEle.style.display === 'none';
     } else {
         throw new Error("*sm_menu: expected true, false (or nothing) as an argument!");
     }
@@ -80,28 +89,13 @@ ChoiceScriptSavePlugin._save = function(saveId, saveName) {
         if (baseSave) {
             baseSave.stats["_smSaveName"] = saveName || "";
             baseSave.stats["_smSaveDateId"] = saveId;
-            ChoiceScriptSavePlugin._addToSaveList(saveId, function(success) {
-                if (!success)
-                    return;
-                saveCookie(function() {}, ChoiceScriptSavePlugin._formatSlotName(saveId), baseSave.stats, baseSave.temps, baseSave.lineNum, baseSave.indent, this.debugMode, this.nav);
-                /* Attempt to re-populate the quick save menu.
-                This might not actually exist when an sm_save is run,
-                so we have to wait a few seconds. If it still doesn't exist
-                it's not the end of the world, but the save won't appear until
-                the next refresh. */
-                setTimeout(function() {
-                    var selectEle = document.getElementById("quickSaveMenu");
-                    if (selectEle) {
-                        selectEle.innerHTML = "";
-                        ChoiceScriptSavePlugin._populateSaveMenu(selectEle);
-                    }
-                }, 3000);
-            });
+            saveCookie(function() {
+                recordSave(saveId, function() {
+                    ChoiceScriptSavePlugin._populateSaveMenu();
+                });
+            }, ChoiceScriptSavePlugin._formatSlotName(saveId), baseSave.stats, baseSave.temps, baseSave.lineNum, baseSave.indent, this.debugMode, this.nav);
         } else {
-            /* ChoiceScript hasn't created a save we can use yet.
-               This happens when we try to save right after the game
-               starts (or a save has just been loaded).
-            */
+            alertify.error('Could not create save');
         }
     });
 }
@@ -127,8 +121,9 @@ ChoiceScriptSavePlugin._load = function(saveId) {
 
 ChoiceScriptSavePlugin._delete = function(saveId) {
     ChoiceScriptSavePlugin._removeFromSaveList(saveId, function(success) {
-        if (!success)
+        if (!success) {
             return;
+        }
         var select = document.getElementById("quickSaveMenu");
         if (select) {
             var deletedOption = select.options[select.selectedIndex];
@@ -139,6 +134,122 @@ ChoiceScriptSavePlugin._delete = function(saveId) {
             // Likely there's nothing to delete
         });
     });
+}
+
+ChoiceScriptSavePlugin._delete_all = function () {
+    ChoiceScriptSavePlugin._getSaveList(function (saveList) {
+        if (!saveList)
+            return;
+        saveList.forEach(function (saveId) {
+            initStore().remove('state' + ChoiceScriptSavePlugin._formatSlotName(saveId), function () {});
+        });
+        initStore().set('save_list', toJson([]), function() {
+            setTimeout(function () {
+                ChoiceScriptSavePlugin._populateSaveMenu();
+            }, timeoutLength);
+        });
+    });
+}
+
+ChoiceScriptSavePlugin._export = function (exportName, saveId) {
+    initStore().get('state' + ChoiceScriptSavePlugin._formatSlotName(saveId), function (ok, value) {
+        if (ok) {
+            var saveItem = 'PS' + window.storeName.replace(/_/g, '__') + 'PSstate' + ChoiceScriptSavePlugin._formatSlotName(saveId) + ':"';
+            saveItem += value + '"';
+            ChoiceScriptSavePlugin._export_file(exportName, saveItem);
+        }
+    });
+}
+
+ChoiceScriptSavePlugin._export_all = function (exportName) {
+    ChoiceScriptSavePlugin._getSaveList(function (saveList) {
+        if (!saveList)
+            return;
+        var saveItem = '';
+        var promises = [];
+        saveList.forEach(function (saveId) {
+            promises.push(new Promise((resolve, reject) => {
+                initStore().get('state' + ChoiceScriptSavePlugin._formatSlotName(saveId), function (ok, value) {
+                    if (ok) {
+                        if (saveItem !== '') {
+                            saveItem += "\n";
+                        }
+                        saveItem += 'PS' + window.storeName.replace(/_/g, '__') + 'PSstate' + ChoiceScriptSavePlugin._formatSlotName(saveId) + ':"';
+                        saveItem += value + '"';
+                    }
+                    resolve();
+                });
+            }));
+        });
+
+        Promise.all(promises).then(function() {
+            ChoiceScriptSavePlugin._export_file(exportName, saveItem);
+        });
+    });
+}
+
+ChoiceScriptSavePlugin._export_file = function (exportName, saveItem) {
+    var textFile = new Blob([saveItem], { type: 'text/plain;charset=utf-8' });
+
+    // create pseudo-hyperlink
+    var exportLink = document.createElement('a');
+    var textFileUrl = window.URL.createObjectURL(textFile);
+    exportLink.setAttribute('id', 'exportLink');
+    exportLink.setAttribute('href', textFileUrl);
+    exportLink.setAttribute('download', (exportName || (window.storeName + ' - Save')) + '.txt');
+    exportLink.click();
+
+    // remove hyperlink after use
+    window.URL.revokeObjectURL(textFileUrl);
+    if (document.getElementById('exportLink')) {
+        document.getElementById('exportLink').remove();
+    }
+};
+
+ChoiceScriptSavePlugin._import = function (fileContent) {
+    if (!fileContent) {
+        alertify.alert('File is empty!');
+        return;
+    }
+    var saveLines = fileContent.split(/\r*\n/);
+    saveLines = saveLines.filter(function (line) {
+        return line !== '';
+    });
+    var storeKey = 'PS' + window.storeName.replace(/_/g, '__') + 'PSstate';
+    var storeKeyLength = storeKey.length;
+
+    var errorCheck = '';
+
+    var newSaveList = [];
+    for (i = 0; i < saveLines.length; i++) {
+        if (saveLines[i].substring(0, storeKeyLength) !== storeKey) {
+            errorCheck = 'Save line ' + (i + 1) + ' error: Save key does not match this game\'s store key!';
+            break;
+        } else {
+            var saveSlotName = saveLines[i].substring(storeKeyLength, saveLines[i].indexOf(":"));
+            var saveSlotToken = saveLines[i].substring(saveLines[i].indexOf(':') + 2, saveLines[i].length - 1);
+            saveSlotToken = saveSlotToken.replace(/^[^{]*/, '');
+            saveSlotToken = saveSlotToken.replace(/[^}]*$/, '');
+            var saveSlotState;
+            try {
+                saveSlotState = jsonParse(saveSlotToken);
+            } catch (e) {
+                errorCheck = 'Save line ' + (i + 1) + ' error: Cannot parse save state!'
+                break;
+            }
+            saveCookie(function () {}, saveSlotName, saveSlotState.stats, saveSlotState.temps, saveSlotState.lineNum, saveSlotState.indent, this.debugMode, this.nav);
+            newSaveList.push(saveSlotState.stats['_smSaveDateId']);
+        }
+    }
+    // Store all imported save slots in one go, otherwise we run into async issues with multiple saves
+    ChoiceScriptSavePlugin._addToSaveList(newSaveList, function () {
+        setTimeout(function () {
+            ChoiceScriptSavePlugin._populateSaveMenu();
+        }, timeoutLength);
+    });
+    if (errorCheck !== '') {
+        alertify.error(errorCheck);
+    }
 }
 
 ChoiceScriptSavePlugin._createQuickSaveMenu = function() {
@@ -174,6 +285,38 @@ ChoiceScriptSavePlugin._createQuickSaveMenu = function() {
             "clickFunc": "ChoiceScriptSavePlugin.delete();"
         }
     ];
+    if (btn_delete_all) {
+        buttonArr.push({
+            'innerHTML': 'Delete All',
+            'clickFunc': 'ChoiceScriptSavePlugin.delete_all();'
+        });
+    }
+    if (btn_export) {
+        buttonArr.push({
+            'innerHTML': 'Export',
+            'clickFunc': 'ChoiceScriptSavePlugin.export();'
+        });
+    }
+    if (btn_export_all) {
+        buttonArr.push({
+            'innerHTML': 'Export All',
+            'clickFunc': 'ChoiceScriptSavePlugin.export_all();'
+        });
+    }
+    if (btn_import) {
+        buttonArr.push({
+            'innerHTML': 'Import',
+            'clickFunc': 'document.getElementById("import").click();'
+        });
+        var input = document.createElement('input');
+        input.setAttribute('type', 'file');
+        input.setAttribute('id', 'import');
+        input.setAttribute('name', 'import');
+        input.setAttribute('accept', '.txt');
+        input.setAttribute('style', 'display:none;');
+        input.setAttribute('onchange', 'ChoiceScriptSavePlugin.import_file(this)');
+        p.appendChild(input);
+    }
 
     for (var i = 0; i < buttonArr.length; i++) {
         var btn = document.createElement("button");
@@ -182,36 +325,38 @@ ChoiceScriptSavePlugin._createQuickSaveMenu = function() {
         btn.setAttribute("onclick", buttonArr[i].clickFunc);
         p.appendChild(btn);
     }
-
-    return selectEle;
 }
 
 /* Add the 'option' elements to the given selection input */
-ChoiceScriptSavePlugin._populateSaveMenu = function(selectEle) {
-    ChoiceScriptSavePlugin._getSaveList(function(saveList) {
-        if (!saveList)
-            return;
-        saveList.forEach(function(saveId) {
-            /* Grab the save data, so we can give it a nice title via _saveName */
-            ChoiceScriptSavePlugin._getSaveData(saveId, function(saveData) {
-                if (!saveData) {
-                    return;
-                }
-                var option = document.createElement("option");
-                option.setAttribute("value", saveData.stats._smSaveDateId /* time/date */ );
-                if (!saveData) {
-                    option.innerHTML = "Failed to load save.";
-                } else {
-                    var slotDesc = saveData.stats.sceneName + '.txt (' + simpleDateTimeFormat(new Date(parseInt(saveData.stats._smSaveDateId))) + ')';
-                    if (saveData.stats._smSaveName) {
-                        slotDesc = saveData.stats._smSaveName + " &mdash; " + slotDesc;
+ChoiceScriptSavePlugin._populateSaveMenu = function() {
+    var selectEle = document.getElementById('quickSaveMenu');
+    if (selectEle) {
+        selectEle.innerHTML = "";
+        ChoiceScriptSavePlugin._getSaveList(function(saveList) {
+            if (!saveList)
+                return;
+            saveList.forEach(function(saveId) {
+                /* Grab the save data, so we can give it a nice title via _saveName */
+                ChoiceScriptSavePlugin._getSaveData(saveId, function(saveData) {
+                    if (!saveData) {
+                        return;
                     }
-                    option.innerHTML = slotDesc;
-                }
-                selectEle.appendChild(option);
+                    var option = document.createElement("option");
+                    option.setAttribute("value", saveData.stats._smSaveDateId /* time/date */ );
+                    if (!saveData) {
+                        option.innerHTML = "Failed to load save.";
+                    } else {
+                        var slotDesc = saveData.stats.sceneName + '.txt (' + simpleDateTimeFormat(new Date(parseInt(saveData.stats._smSaveDateId))) + ')';
+                        if (saveData.stats._smSaveName) {
+                            slotDesc = saveData.stats._smSaveName + " &mdash; " + slotDesc;
+                        }
+                        option.innerHTML = slotDesc;
+                    }
+                    selectEle.appendChild(option);
+                });
             });
         });
-    });
+    }
 }
 
 ChoiceScriptSavePlugin._getSaveData = function(saveId, callback) {
@@ -225,18 +370,23 @@ ChoiceScriptSavePlugin._getSaveData = function(saveId, callback) {
     });
 }
 
-/* The save list is a space separated string of date identifiers, e.g.
-        "1581976656199 1581976297095 1581976660752"
+/* The save list is a json encoded array of timestamps, e.g.
+        [1581976656199,1581976297095,1581976660752]
     We use this to keep a record of stored save keys/handles.
 */
-ChoiceScriptSavePlugin._removeFromSaveList = function(saveId, callback) {
+ChoiceScriptSavePlugin._addToSaveList = function(saveIds, callback) {
     ChoiceScriptSavePlugin._getSaveList(function(saveList) {
-        if (!saveList)
+        if (!saveList) {
             return;
-        var index = saveList.indexOf(saveId.toString());
-        if (index > -1)
-            saveList.splice(index, 1);
-        initStore().set("save_list", saveList.join(" "), function(success, val) {
+        }
+        saveIds.forEach(function(saveId) {
+            // Prevent duplicates
+            const index = saveList.indexOf(saveId);
+            if (index === -1) {
+                saveList.push(saveId);
+            }
+        });
+        initStore().set('save_list', toJson(saveList), function(success) {
             ChoiceScriptSavePlugin._syncHelperVariables(saveList, function() {
                 callback(success);
             })
@@ -244,12 +394,16 @@ ChoiceScriptSavePlugin._removeFromSaveList = function(saveId, callback) {
     });
 }
 
-ChoiceScriptSavePlugin._addToSaveList = function(saveId, callback) {
+ChoiceScriptSavePlugin._removeFromSaveList = function(saveId, callback) {
     ChoiceScriptSavePlugin._getSaveList(function(saveList) {
-        if (!saveList)
+        if (!saveList) {
             return;
-        saveList.push(saveId.toString());
-        initStore().set("save_list", saveList.join(" "), function(success, val) {
+        }
+        const index = saveList.indexOf(saveId);
+        if (index > -1) {
+            saveList.splice(index, 1);
+        }
+        initStore().set('save_list', toJson(saveList), function(success) {
             ChoiceScriptSavePlugin._syncHelperVariables(saveList, function() {
                 callback(success);
             })
@@ -273,23 +427,39 @@ ChoiceScriptSavePlugin._syncHelperVariables = function(saveList, callback) {
 
 /* Pull the list of stored 'saves' from the store by store name */
 ChoiceScriptSavePlugin._getSaveList = function(callback) {
-    initStore().get("save_list", function(success, val) {
-        if (!success)
+    initStore().get('save_list', function(success, saveList) {
+        if (!success) {
             callback(null);
-        if (!val)
-            callback([]);
-        else
-            callback(saveList = val.split(" ").sort(function(a, b) {
+        } else {
+            // Upgrade old save_list from string to json
+            var isJson = true;
+            try {
+                var parsedList = jsonParse(saveList);
+                if (typeof parsedList !== 'object') {
+                    isJson = false;
+                }
+            } catch (e) {
+                saveList = [];
+                isJson = false;
+            }
+            if (!isJson) {
+                parsedList = saveList.split(' ').map((saveId) => parseInt(saveId));
+                // Write back converted value to storage
+                initStore().set('save_list', toJson(parsedList), function() {});
+            }
+
+            parsedList = parsedList.sort(function(a, b) {
                 return b - a;
-            }));
+            });
+            callback(parsedList);
+        }
     });
 }
 
 ChoiceScriptSavePlugin._init = function() {
-    // don't initialize until files have been uploaded (CS commit: 8092aedf17505bd5f9b46c76acf082b89d494a03)
-    if (("file:" === window.location.protocol) &&
-       (typeof window.uploadedFiles === "undefined" && typeof allScenes === "undefined")) {
-        setTimeout(ChoiceScriptSavePlugin._init, 3000);
+    // don't initialize until save system has been initialized
+    if (!Persist._init) {
+        setTimeout(ChoiceScriptSavePlugin._init, timeoutLength);
         return;
     }
     if (!window.storeName) {
@@ -301,13 +471,14 @@ ChoiceScriptSavePlugin._init = function() {
         Scene.validCommands["sm_menu"] = 0;
         return alertify.error("Disabling ChoiceScript Save Plugin as there is no storeName detected. Please check your index.html.");
     }
-    ChoiceScriptSavePlugin._populateSaveMenu(ChoiceScriptSavePlugin._createQuickSaveMenu());
+    ChoiceScriptSavePlugin._createQuickSaveMenu();
+    ChoiceScriptSavePlugin._populateSaveMenu();
 }
 
 /* ----- FrameWork Functionality (External) ----- */
 
 ChoiceScriptSavePlugin.save = function() {
-    if (stats.sceneName == "choicescript_stats") {
+    if (stats.sceneName === "choicescript_stats") {
         alert("Error: Unable to save at this point.");
         return;
     }
@@ -320,7 +491,7 @@ ChoiceScriptSavePlugin.save = function() {
         } else {
             // user cancelled
         }
-    }, "Quick Save" /* default value */ );
+    }, '' /* default value */);
 }
 
 ChoiceScriptSavePlugin.delete = function() {
@@ -350,5 +521,70 @@ ChoiceScriptSavePlugin.load = function() {
     });
 }
 
+ChoiceScriptSavePlugin.delete_all = function () {
+    var message = 'Delete all saves?<br>This cannot be undone!';
+    alertify.confirm(message, function (result) {
+        if (!result) {
+            return;
+        } else {
+            ChoiceScriptSavePlugin._delete_all();
+        }
+    });
+}
+
+ChoiceScriptSavePlugin.export = function () {
+    if (!window.Blob) {
+        alertify.alert('Unable to export saves on this browser!');
+        return;
+    }
+    var select = document.getElementById('quickSaveMenu');
+    if (select.value <= 0)
+        return;
+    var date = new Date();
+    var message = 'What would you like to call this export file?<br>Leaving this blank will result in a game identifier.';
+
+    alertify.prompt(message, function (e, exportName) {
+        if (e) {
+            ChoiceScriptSavePlugin._export(exportName, select.value);
+        } else {
+            // user cancelled
+        }
+    }, '' /* default value */);
+}
+
+ChoiceScriptSavePlugin.export_all = function () {
+    if (!window.Blob) {
+        alertify.alert('Unable to export saves on this browser!');
+        return;
+    }
+    var date = new Date();
+    var message = 'What would you like to call this export file?<br>Leaving this blank will result in a game identifier.';
+
+    alertify.prompt(message, function (e, exportName) {
+        if (e) {
+            ChoiceScriptSavePlugin._export_all(exportName);
+        } else {
+            // user cancelled
+        }
+    }, '' /* default value */);
+}
+
+ChoiceScriptSavePlugin.import_file = function (event) {
+    if (!event.files) {
+        return;
+    }
+
+    if (event.files[0].type && event.files[0].type !== 'text/plain') {
+        alertify.alert('That is not a text file!');
+        return;
+    }
+
+    var reader = new FileReader();
+    reader.addEventListener('load', function(event) {
+        ChoiceScriptSavePlugin._import(event.target.result);
+    });
+    reader.readAsText(event.files[0]);
+}
+
 // initialize after a small delay, so everything else can catch up.
-setTimeout(ChoiceScriptSavePlugin._init, 3000);
+setTimeout(ChoiceScriptSavePlugin._init, timeoutLength);
